@@ -1,0 +1,6 @@
+{
+  "name": "SpliceGuard - Conveyor Splice Monitor",
+  "description": "Heavy-duty iron-ore conveyor belt splice condition monitoring and predictive maintenance decision support for NMDC / Ministry of Steel (SIH 2026 PS 26008).",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

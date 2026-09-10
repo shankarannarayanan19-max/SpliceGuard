@@ -1,0 +1,106 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --font-sans: 'Outfit', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    --font-mono: 'JetBrains Mono', 'Chakra Petch', monospace;
+  }
+
+  body {
+    font-family: var(--font-sans);
+    background-color: #f8fafc;
+    color: #0f172a;
+    overflow-x: hidden;
+    margin: 0;
+    padding: 0;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  /* Custom subtle scrollbar */
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  ::-webkit-scrollbar-track {
+    background: #f1f5f9;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: #cbd5e1;
+    border-radius: 3px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: #94a3b8;
+  }
+}
+
+.font-mono-tech {
+  font-family: 'JetBrains Mono', monospace;
+}
+
+.font-display-tech {
+  font-family: 'Chakra Petch', sans-serif;
+}
+
+/* Cyber-industrial glow effects */
+.glow-cyan {
+  box-shadow: 0 0 25px -5px rgba(6, 182, 212, 0.45);
+}
+
+.glow-amber {
+  box-shadow: 0 0 25px -5px rgba(245, 158, 11, 0.45);
+}
+
+.glow-emerald {
+  box-shadow: 0 0 25px -5px rgba(16, 185, 129, 0.45);
+}
+
+.glow-rose {
+  box-shadow: 0 0 25px -5px rgba(244, 63, 94, 0.45);
+}
+
+.glow-violet {
+  box-shadow: 0 0 25px -5px rgba(139, 92, 246, 0.45);
+}
+
+/* Subtle tech grid background */
+.bg-grid-tech {
+  background-size: 32px 32px;
+  background-image: 
+    linear-gradient(to right, rgba(15, 23, 42, 0.04) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(15, 23, 42, 0.04) 1px, transparent 1px);
+}
+
+.bg-dots-tech {
+  background-image: radial-gradient(rgba(15, 23, 42, 0.07) 1px, transparent 1px);
+  background-size: 20px 20px;
+}
+
+/* Industrial scanline beam animation */
+@keyframes scanline {
+  0% { transform: translateY(-100%); opacity: 0; }
+  50% { opacity: 0.8; }
+  100% { transform: translateY(1000%); opacity: 0; }
+}
+
+.animate-scanline {
+  animation: scanline 2.8s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+
+@keyframes pulseSlow {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.75; transform: scale(1.02); }
+}
+
+.animate-pulse-slow {
+  animation: pulseSlow 3s ease-in-out infinite;
+}
+
+@keyframes conveyorStripes {
+  0% { background-position: 0 0; }
+  100% { background-position: 40px 0; }
+}
+
+.animate-conveyor-stripes {
+  animation: conveyorStripes 1s linear infinite;
+}
