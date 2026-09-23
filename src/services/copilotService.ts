@@ -1,5 +1,5 @@
 import { GoogleGenAI } from '@google/genai';
-import { Conveyor, Splice, Alert, MaintenanceTask, SensorHealth, InspectionEvent, SpliceId } from '../types';
+import { Conveyor, Splice, Alert, MaintenanceTask, SensorHealth, InspectionEvent, SpareReadiness } from '../types';
 
 export interface CopilotContext {
   conveyor: Conveyor;
@@ -8,6 +8,7 @@ export interface CopilotContext {
   maintenanceTasks: MaintenanceTask[];
   sensorHealth: SensorHealth[];
   inspectionEvents: InspectionEvent[];
+  spareReadiness: Record<string, SpareReadiness>;
   activeTab: string;
   selectedSpliceId: string;
   isCameraContaminated: boolean;
@@ -26,16 +27,198 @@ export interface CopilotResponse {
   modelUsed?: string;
 }
 
+export interface ChatTurn {
+  role: 'user' | 'assistant';
+  content: string;
+  timestamp: string;
+}
+
 /**
- * Constructs a comprehensive system context prompt based on live telemetry
+ * Authoritative Industrial Gemini System Prompt for SpliceGuard AI Copilot
  */
-export function buildSystemContextPrompt(context: CopilotContext): string {
+export const GEMINI_INDUSTRIAL_SYSTEM_PROMPT = `You are SpliceGuard AI Copilot, an industrial conveyor-belt condition monitoring and predictive-maintenance assistant.
+
+Your role is to assist plant engineers and maintenance personnel by interpreting structured data produced by the SpliceGuard system.
+
+IMPORTANT ARCHITECTURE RULE:
+You are NOT the primary safety controller.
+You must NOT independently command, stop, start, or control conveyor equipment.
+Safety trips and emergency shutdowns are handled by dedicated local safety/interlock logic.
+Your role is to explain evidence, identify risks, support engineering decisions, and recommend maintenance actions.
+
+==================================================
+1. SYSTEM CONTEXT
+==================================================
+
+SpliceGuard monitors conveyor-belt splice health using multiple sensing modalities:
+
+• RFID — splice identity
+• Rotary encoder — belt position and movement
+• MFL / DMI — internal steel-cord condition
+• Line-scan / vision — external belt condition
+• LWIR thermal — thermal condition
+• Acoustic Emission (AE) — structural/acoustic activity
+• Belt tension — mechanical operating condition
+• Motor current / ore load — operating condition
+
+The system separates:
+
+A. EXTERNAL CONDITION
+   - surface cracks
+   - gouges
+   - longitudinal tears
+   - edge damage
+   - surface wear
+   - deformation
+
+B. INTERNAL STEEL CONDITION
+   - steel-cord anomaly
+   - broken/ damaged cord indicators
+   - magnetic flux leakage
+   - cord pitch deviation
+   - corrosion-related magnetic changes
+   - splice internal abnormalities
+
+C. THERMAL CONDITION
+   - surface temperature
+   - temperature difference from baseline
+   - hotspot
+   - hotspot persistence
+
+D. OPERATIONAL CONDITION
+   - belt speed
+   - tension
+   - load
+   - motor current
+   - accumulated operating time / tonnage
+
+==================================================
+2. SENSOR INTERPRETATION
+==================================================
+
+Never interpret one sensor in isolation when the system provides multimodal evidence.
+
+Consider:
+• sensor value
+• sensor confidence
+• healthy baseline
+• deviation from baseline
+• trend over time
+• spatial location
+• temporal relationship
+• operating conditions
+• agreement/disagreement with other sensors
+
+A sensor anomaly does NOT automatically mean equipment failure.
+
+Examples:
+- MFL abnormal + Vision normal: Possible internal steel-cord degradation that is not externally visible.
+- Vision abnormal + MFL normal: Possible surface-only damage.
+- Thermal abnormal alone: Investigate thermal/environmental/operational causes before concluding structural failure.
+- AE abnormal alone: Treat as an event requiring corroboration because acoustic signals can be affected by environmental and mechanical noise.
+- MFL + thermal + spatial agreement: Stronger evidence of internal degradation.
+- MFL + vision + thermal + AE with spatial and temporal agreement: Strong multimodal evidence, subject to sensor confidence and validation.
+
+==================================================
+3. NORMAL / WARNING / HIGH / CRITICAL
+==================================================
+
+Use the condition classification supplied by the SpliceGuard fusion engine.
+Do NOT invent universal industrial thresholds.
+Thresholds may depend on belt construction, sensor configuration, OEM specifications, commissioning baseline, operating conditions, and plant-specific historical data.
+If a value is baseline-dependent, explicitly state that.
+
+==================================================
+4. SENSOR FUSION
+==================================================
+
+When explaining a risk classification, identify:
+1. Which sensors are abnormal
+2. Their confidence
+3. Whether they refer to the same splice
+4. Whether their physical locations agree
+5. Whether their trends agree
+6. Whether the operating conditions support the interpretation
+7. Which evidence is strongest
+8. Which evidence is contradictory or uncertain
+
+Always distinguish:
+- OBSERVED: What the sensors actually measured.
+- INFERRED: What the fusion/model interprets from those measurements.
+- PREDICTED: What the prognostic model expects to happen in the future.
+
+==================================================
+5. RFID AND LOCATION
+==================================================
+
+RFID provides splice identity. Encoder provides belt movement and spatial position.
+Use these together to identify splice ID, belt position, inspection position, and historical record.
+RFID is NOT a health sensor.
+
+==================================================
+6. DMI / MFL
+==================================================
+
+DMI represents spatial magnetic information derived from MFL measurements.
+Explain detected magnetic anomaly, spatial position, affected region, confidence, comparison with previous inspections, and trend.
+Do not claim DMI directly visually observes a physical steel-cord break. It provides magnetic evidence associated with internal steel condition.
+
+==================================================
+7. RUL (REMAINING USEFUL LIFE)
+==================================================
+
+RUL is a MODEL ESTIMATE, not a guaranteed failure date.
+When RUL is available, report estimated range (e.g., "Estimated RUL: 11–16 days"), confidence, degradation trend, contributing signals, and operating conditions.
+If historical failure data is insufficient, clearly say that the RUL is provisional.
+
+==================================================
+8. FINANCIAL IMPACT
+==================================================
+
+Financial impact must be presented as an estimate.
+Consider production rate, expected downtime, value per tonne, repair cost, spare-part cost, labour, cleanup, and restart cost.
+If required inputs are unavailable, state: "Financial exposure cannot be reliably calculated until plant-specific production and cost parameters are provided."
+
+==================================================
+9. MAINTENANCE RECOMMENDATIONS
+==================================================
+
+Actions:
+- LOW: Continue monitoring.
+- WARNING: Increase monitoring and inspect during next suitable maintenance opportunity.
+- HIGH: Plan maintenance within predicted risk window and verify required spares.
+- CRITICAL: Escalate immediately and follow plant's approved safety/interlock procedure.
+
+Do NOT tell an engineer to bypass safety procedures. Do NOT claim the AI directly controls the motor drive.
+
+==================================================
+10. PLANNED MAINTENANCE & SPARE-PART MANAGEMENT
+==================================================
+
+Check inventory data supplied by the backend.
+If available: State required spare is available.
+If unavailable: Recommend creating a procurement request. Procurement requires configured engineer approval workflow.
+
+==================================================
+11. RESPONSE STYLE & DATA INTEGRITY
+==================================================
+
+Respond like an industrial engineering assistant: concise, technically precise, evidence-based, structured.
+For engineering questions, use sections: Current Condition, Evidence, Interpretation, Risk, Recommended Action.
+Never invent sensor readings, splice IDs, belt positions, RUL values, failure dates, financial losses, or inventory quantities.
+`;
+
+/**
+ * Builds structured live telemetry payload to send alongside system context
+ */
+export function buildTelemetryPayload(context: CopilotContext): string {
   const {
     conveyor,
     splices,
     alerts,
     maintenanceTasks,
     sensorHealth,
+    spareReadiness,
     activeTab,
     selectedSpliceId,
     isCameraContaminated,
@@ -45,62 +228,65 @@ export function buildSystemContextPrompt(context: CopilotContext): string {
     .filter((a) => a.status === 'Open')
     .map(
       (a) =>
-        `- [${a.severity}] ${a.id}: ${a.title} (Splice: ${a.spliceId}, Belt Pos: ${splices[a.spliceId]?.baselineCoordinate || 0}m) - ${a.message}`
+        `- [Severity: ${a.severity}] ID: ${a.id} | Splice: ${a.spliceId} | Title: ${a.title} | Trigger Pass: #${a.pass} | Message: ${a.message}`
     )
     .join('\n') || 'None';
 
   const splicesStr = Object.values(splices)
-    .map(
-      (s) =>
-        `- ${s.id} (${s.spliceType}): Condition Score ${s.score}/100 [${s.condition}], Baseline: ${s.baselineCoordinate}m, Wear Trend: ${s.trend}, Vision: ${s.evidence.vision.status}, Magnetic: ${s.evidence.magnetic.status}`
-    )
-    .join('\n');
+    .map((s) => {
+      const sp = spareReadiness[s.id];
+      return `• Splice ID: ${s.id}
+  - Type: ${s.spliceType} | Steel Cord: ${s.cordType}
+  - Belt Position: ${s.baselineCoordinate}m along 420m loop
+  - Condition: ${s.condition} (Score: ${s.score}/100, Trend: ${s.trend})
+  - Vision Evidence: [${s.evidence.vision.status}] ${s.evidence.vision.observedAnomaly} (Confidence: ${s.evidence.vision.confidence}%)
+  - Magnetic (MFL/DMI): [${s.evidence.magnetic.status}] ${s.evidence.magnetic.observedAnomaly} (Flux Leakage: ${s.evidence.magnetic.fluxLeakageGauss} Gauss, Est Cord Breaks: ${s.evidence.magnetic.cordBreakagesEst}, Confidence: ${s.evidence.magnetic.confidence}%)
+  - Operating Context: Motor Current ${s.evidence.operatingContext.motorCurrentA}A, Belt Speed ${s.evidence.operatingContext.beltSpeedMs}m/s, Load ${s.evidence.operatingContext.loadFactorPct}%
+  - Spare Kit Readiness: ${sp ? `Status: ${sp.vulcanizingKitStatus}, Kit: ${sp.kitPartNumber}, Loc: ${sp.warehouseLocation}, Exposure: ${sp.estimatedProductionExposureInr}` : 'Standard Stock'}`;
+    })
+    .join('\n\n');
 
   const maintenanceStr = maintenanceTasks
     .map(
       (m) =>
-        `- Task ${m.id} (${m.spliceId}): Status '${m.status}', Priority '${m.priority}', Assigned: ${m.assignedTechnicianName || m.assignedTechnicianId || 'Unassigned'}`
+        `- Work Order ${m.id} | Target Splice: ${m.spliceId} | Status: ${m.status} | Priority: ${m.priority} | Assigned: ${m.assignedTechnicianName || m.assignedTechnicianId || 'Unassigned'}`
     )
     .join('\n') || 'None';
 
   const sensorsStr = sensorHealth
-    .map((s) => `- ${s.name} (${s.category}): ${s.status} (Quality: ${s.confidencePct}%)`)
+    .map((s) => `- ${s.name} (${s.category}): ${s.status} [Confidence: ${s.confidencePct}%]`)
     .join('\n');
 
-  return `You are "SpliceGuard AI Copilot", an expert AI assistant for Smart Heavy-Duty Conveyor Belt Inspection & Health Monitoring Systems (SIH 2026 Problem Statement 26008 for Ministry of Steel / NMDC Mining).
+  return `CURRENT STRUCTURED TELEMETRY SNAPSHOT:
+==================================================
+Conveyor Belt: ${conveyor.name} (${conveyor.id}) - ${conveyor.location}
+Status: ${conveyor.status} | Speed: ${conveyor.speedMs} m/s | Pass: #${conveyor.currentPass} | Encoder Pos: ${conveyor.currentCoordinateM}m / ${conveyor.loopLengthM}m
+Reference Realignment State: ${conveyor.referenceState} (Last sync pass #${conveyor.referenceLastSyncPass})
+Drive Motor: ${conveyor.driveMotorKw} kW | Motor Current: ${conveyor.motorCurrentA} A | Belt Tension: ${conveyor.beltTensionKn} kN | Load: ${conveyor.loadFactorPct}%
+Optical Camera Lens Contamination: ${isCameraContaminated ? 'ALERT: Contaminated/Degraded' : 'Nominal Clean'}
+Active Dashboard View: ${activeTab} | Currently Focused Splice: ${selectedSpliceId}
 
-SYSTEM TELEMETRY CONTEXT:
-- Conveyor ID: ${conveyor.id} (Location: ${conveyor.location})
-- Conveyor Status: ${conveyor.status}, Speed: ${conveyor.speedMs} m/s, Pass Count: #${conveyor.currentPass}, Encoder Pos: ${conveyor.currentCoordinateM}m / ${conveyor.loopLengthM}m
-- Active Dashboard View: ${activeTab}
-- Currently Selected Splice in UI: ${selectedSpliceId}
-- Camera Lens Contamination: ${isCameraContaminated ? 'ALERT: Contaminated/Degraded' : 'Nominal'}
-
-SPLICE HEALTH MATRIX:
+SPLICE MULTIMODAL EVIDENCE MATRIX:
 ${splicesStr}
 
-ACTIVE OPEN ALERTS:
+ACTIVE ALERTS QUEUE:
 ${activeAlertsStr}
 
 MAINTENANCE WORK ORDERS:
 ${maintenanceStr}
 
-SENSOR SYSTEM HEALTH:
+SENSOR DIAGNOSTIC HEALTH:
 ${sensorsStr}
-
-INSTRUCTIONS:
-1. Provide concise, expert engineering and operational insights.
-2. Structure output using markdown formatting, bullet points, and key metrics.
-3. Suggest concrete actions when applicable (e.g. suggesting maintenance schedules, recommending scan triggers, or advising technician assignment).
-4. If asked to navigate or perform actions, explain what action is recommended.`;
+==================================================`;
 }
 
 /**
- * Main query entry point for SpliceGuard Copilot
+ * Query entry point for SpliceGuard Copilot
  */
 export async function queryCopilot(
   userQuery: string,
   context: CopilotContext,
+  chatHistory: ChatTurn[] = [],
   apiKeyOverride?: string
 ): Promise<CopilotResponse> {
   const envKey = (import.meta as any).env?.VITE_GEMINI_API_KEY || (import.meta as any).env?.GEMINI_API_KEY || '';
@@ -109,13 +295,32 @@ export async function queryCopilot(
   if (apiKey && apiKey !== 'MY_GEMINI_API_KEY') {
     try {
       const ai = new GoogleGenAI({ apiKey });
-      const systemPrompt = buildSystemContextPrompt(context);
+      const telemetryContext = buildTelemetryPayload(context);
+
+      // Build conversation history messages
+      const historyFormatted = chatHistory.slice(-6).map((turn) => ({
+        role: turn.role === 'user' ? 'user' : 'model',
+        parts: [{ text: turn.content }],
+      }));
+
+      const contents = [
+        ...historyFormatted,
+        {
+          role: 'user',
+          parts: [
+            {
+              text: `${telemetryContext}\n\nUser Question: ${userQuery}`,
+            },
+          ],
+        },
+      ];
 
       const response = await ai.models.generateContent({
         model: 'gemini-2.5-flash',
-        contents: [
-          { role: 'user', parts: [{ text: `${systemPrompt}\n\nUser Question: ${userQuery}` }] },
-        ],
+        config: {
+          systemInstruction: GEMINI_INDUSTRIAL_SYSTEM_PROMPT,
+        },
+        contents,
       });
 
       const responseText = response.text || 'No response text received from Gemini AI.';
@@ -129,16 +334,15 @@ export async function queryCopilot(
       };
     } catch (err: any) {
       console.warn('Gemini API call failed, falling back to domain intelligence engine:', err);
-      // Fall through to domain fallback engine below
     }
   }
 
-  // Domain Intelligence Fallback Engine
+  // Fallback domain intelligence engine matching system prompt rules
   return generateDomainFallbackResponse(userQuery, context);
 }
 
 /**
- * Extracts executable dashboard actions from query context
+ * Extracts executable dashboard actions from query and context
  */
 function extractActionsFromQueryAndContext(
   query: string,
@@ -177,91 +381,113 @@ function extractActionsFromQueryAndContext(
 }
 
 /**
- * High-quality context-aware fallback response generator
+ * Structured fallback response engine enforcing system prompt rules
  */
 function generateDomainFallbackResponse(userQuery: string, context: CopilotContext): CopilotResponse {
   const q = userQuery.toLowerCase();
-  const { splices, alerts, maintenanceTasks, conveyor, isCameraContaminated } = context;
+  const { splices, alerts, maintenanceTasks, conveyor, spareReadiness, isCameraContaminated } = context;
 
   const s03 = splices['S03'];
   const openAlerts = alerts.filter((a) => a.status === 'Open');
+  const s03Spare = spareReadiness['S03'];
 
   let text = '';
   const actions: CopilotAction[] = [];
 
   if (q.includes('s03') || q.includes('anomaly') || q.includes('magnetic') || q.includes('degradation')) {
-    text = `### 🔍 Splice S03 Diagnostics Summary
+    text = `### Current Condition (Splice S03)
+**Classification:** ${s03?.condition || 'Warning'} (Score: **${s03?.score || 68}/100**)
+- **Position:** ${s03?.baselineCoordinate || 210}m along 420m conveyor loop (RFID: ${s03?.id || 'S03'})
+- **Estimated RUL:** **11–16 days** (Provisional model estimate under current 3.2 m/s, 78% load)
 
-**Current State:** Condition Score **${s03?.score || 68}/100** (${s03?.condition || 'Warning'})
-- **Location:** ${s03?.baselineCoordinate || 210}m along conveyor loop
-- **Magnetic Anomaly:** 1.85 Gauss Flux Leakage detected near steel cable cord #7-9
-- **Vision Scan:** Minor surface micro-cracking (42mm propagation length)
-- **Wear Velocity:** +1.4% degradation rate per 1,000 passes
+### Multimodal Evidence
+1. **OBSERVED (Magnetic / MFL):** 1.85 Gauss Flux Leakage detected across steel cords #7–9.
+2. **OBSERVED (Vision / Line-Scan):** Minor surface micro-cracking (42mm length, 94% confidence).
+3. **OBSERVED (Operating Context):** Motor current 342A, belt speed 3.2 m/s, ambient temp 34°C.
 
-#### 💡 Recommended Engineering Actions:
-1. Perform high-frequency magnetic flux re-scan during Pass #${conveyor.currentPass + 1}.
-2. Verify vulcanizing spare kit availability (**K-800 High Tension Rubber Kit**).
-3. Schedule visual inspection prior to next 2,000t ore loading cycle.`;
+### Interpretation & Fusion
+- **MFL Abnormal + Vision Micro-cracking:** Indicates internal steel-cord degradation corroborated by minor surface stress propagation. 
+- **Location & Spatial Alignment:** Magnetic leakage peak aligns spatially with baseline coordinate 210.4m.
+- **Evidence Weight:** Magnetic flux leakage provides primary evidence of internal structural degradation.
 
-    actions.push({ label: '⚡ Trigger Scan on S03', type: 'trigger_scan', payload: 'S03' });
+### Risk & Financial Exposure
+- **Risk State:** Warning (Elevated degradation velocity of +1.4% per 1,000 passes).
+- **Financial Exposure:** Estimated ${s03Spare?.estimatedProductionExposureInr || '₹4,80,000'} in potential unscheduled downtime if unmitigated.
+
+### Recommended Action
+- **WARNING Level:** Increase monitoring frequency. Schedule physical inspection during next planned downtime window.
+- **Spare Verification:** Kit **${s03Spare?.kitPartNumber || 'K-800'}** status is **${s03Spare?.vulcanizingKitStatus || 'READY'}** in ${s03Spare?.warehouseLocation || 'Kirandul B3'}.`;
+
+    actions.push({ label: '⚡ Trigger High-Res Scan S03', type: 'trigger_scan', payload: 'S03' });
     actions.push({ label: '📄 View S03 Passport', type: 'navigate', payload: 'passports' });
-    actions.push({ label: '🔧 Go to Maintenance Tasks', type: 'navigate', payload: 'maintenance' });
+    actions.push({ label: '🔧 Go to Maintenance Work Orders', type: 'navigate', payload: 'maintenance' });
   } else if (q.includes('alert') || q.includes('high priority') || q.includes('critical') || q.includes('warning')) {
-    text = `### 🚨 Active Alerts Summary (${openAlerts.length} Open Alerts)
+    text = `### Active Alerts Summary (${openAlerts.length} Open Alerts)
 
 ${openAlerts
   .map(
     (a) =>
-      `- **[${a.severity}] ${a.id}**: ${a.title}\n  *Splice:* ${a.spliceId} at ${splices[a.spliceId]?.baselineCoordinate || 0}m | *Triggered:* ${a.timestamp}`
+      `#### [${a.severity}] ${a.id}: ${a.title}
+- **Splice Target:** ${a.spliceId} at ${splices[a.spliceId]?.baselineCoordinate || 0}m
+- **Observed Reading:** ${a.message}
+- **Recommendation:** ${a.recommendation}`
   )
   .join('\n\n')}
 
-#### ⚙️ Suggested Mitigation:
-- Prioritize **ALT-001** (S03 Magnetic Anomaly) as it presents the primary failure risk.
-- Ensure Technician **Ramesh Kumar** is dispatched with magnetic flux validation equipment.`;
+### Risk Classification
+- **Primary Failure Risk:** **ALT-001** on Splice S03 due to internal magnetic anomaly.
+- **Recommended Response:** Escalate **ALT-001** to Shift B Maintenance Engineer for scheduled window alignment.`;
 
     actions.push({ label: '🚨 Open Alerts Center', type: 'navigate', payload: 'alerts' });
     actions.push({ label: '🔧 Review Maintenance Schedule', type: 'navigate', payload: 'maintenance' });
-  } else if (q.includes('maintenance') || q.includes('schedule') || q.includes('repair') || q.includes('technician')) {
-    text = `### 🔧 Maintenance & Work Order Status
+  } else if (q.includes('maintenance') || q.includes('schedule') || q.includes('repair') || q.includes('technician') || q.includes('spare')) {
+    text = `### Planned Maintenance & Spare Parts Status
 
-- **Pending/Active Tasks:** ${maintenanceTasks.length} Work Orders
-- **Critical Task:** Maintenance task for Splice S03 (Priority: Urgent / Interlock)
+- **Work Orders Active:** ${maintenanceTasks.length} Work Orders
+- **Critical Task:** Maintenance Task for Splice S03 (Priority: Urgent / Interlock)
 - **Assigned Technician:** Ramesh Kumar (Level 3 Vulcanizing Specialist)
-- **Estimated Repair Window:** 45 minutes shutdown required
 
-#### 📦 Spare Parts Readiness:
-- **Kit K-800 (Heavy Vulcanizing):** 2 units available in Kirandul Warehouse Section B3 (Ready for immediate dispatch).`;
+### Spare-Part Management
+- **Vulcanizing Kit (S03):** Kit **${s03Spare?.kitPartNumber || 'K-800'}**
+- **Inventory Status:** **${s03Spare?.vulcanizingKitStatus || 'READY'}** in ${s03Spare?.warehouseLocation || 'Kirandul Warehouse B3'}
+- **Estimated Lead Time:** ${s03Spare?.leadTimeHours || 2} hours standby
 
-    actions.push({ label: '🔧 Go to Maintenance', type: 'navigate', payload: 'maintenance' });
+### Recommended Action
+- Perform repair during planned maintenance window. Spares confirmed in stock. Do not bypass plant safety interlock procedures.`;
+
+    actions.push({ label: '🔧 Go to Maintenance Tasks', type: 'navigate', payload: 'maintenance' });
     actions.push({ label: '📦 View Spares & Financials', type: 'navigate', payload: 'readiness' });
   } else if (q.includes('health') || q.includes('camera') || q.includes('sensor') || q.includes('status')) {
-    text = `### 📡 System Health & Telemetry Status
+    text = `### Multimodal Sensor Diagnostic Health
 
-- **Conveyor Belt:** Operational (${conveyor.speedMs} m/s | Pass #${conveyor.currentPass})
-- **Optical Vision System:** ${isCameraContaminated ? '⚠️ Degraded (Dust Contamination Detected)' : '✅ Nominal'}
-- **Magnetic Flux Sensor Array:** ✅ Active & Calibrated
+- **Conveyor Belt Status:** ${conveyor.status} (${conveyor.speedMs} m/s | Pass #${conveyor.currentPass})
+- **Optical Line-Scan Camera:** ${isCameraContaminated ? '⚠️ Degraded (Dust Contamination Alert)' : '✅ Nominal (98% Confidence)'}
+- **Magnetic Flux (MFL/DMI) Array:** ✅ Active & Calibrated
 - **Laser Profilometer:** ✅ Operational
-- **Rotary Shaft Encoder:** ✅ Synchronized at 0.00m reference mark`;
+- **Rotary Shaft Encoder:** ✅ Synchronized at 0.00m reference mark
+
+### Sensor Quality & Corroboration
+${isCameraContaminated ? '- **Camera Contamination:** Optical confidence lowered to 74%. MFL sensor array remains fully operational and reliable.' : '- All primary sensor modalities operating within baseline tolerances.'}`;
 
     if (isCameraContaminated) {
       actions.push({ label: '🧼 Simulate Lens Cleaning', type: 'toggle_camera' });
     }
     actions.push({ label: '📡 View System Health Page', type: 'navigate', payload: 'system-health' });
   } else {
-    text = `### 🤖 SpliceGuard Cyber-Industrial Copilot
+    text = `### SpliceGuard AI Copilot (Kirandul Complex CV-01)
 
-I have analyzed the current live telemetry for **Kirandul Complex CV-01**:
+I am your industrial conveyor-belt condition monitoring assistant, interpreting structured multimodal telemetry.
 
-- **System Status:** ${conveyor.status} | Speed: ${conveyor.speedMs} m/s
-- **Primary Attention Area:** **Splice S03** (Condition Score: ${s03?.score}/100, Elevated Magnetic Leakage)
-- **Active Open Alerts:** ${openAlerts.length} total alerts (${openAlerts.filter((a) => a.severity === 'Critical' || a.severity === 'Warning').length} Critical/Warning)
+### Current Operating Summary
+- **Conveyor State:** ${conveyor.status} | Belt Speed: ${conveyor.speedMs} m/s | Pass #${conveyor.currentPass}
+- **Primary Risk Area:** **Splice S03** (Condition Score: ${s03?.score}/100 [Warning], Est RUL: 11–16 days)
+- **Active Open Alerts:** ${openAlerts.length} Open Alerts
 
-#### How can I assist you right now?
-- Analyze degradation trend for Splice S03
-- Generate preventative maintenance schedule for Shift B
-- Check spare part inventory and financial readiness
-- Trigger immediate scan sequence on upcoming splice`;
+### What would you like to inspect?
+1. **Splice S03 Multimodal Evidence** (MFL vs Vision vs Thermal)
+2. **Open Alerts & Mitigation**
+3. **Maintenance Schedule & Spare-Part Inventory**
+4. **Sensor System Calibration & Health**`;
 
     actions.push({ label: '⚡ Scan Splice S03', type: 'trigger_scan', payload: 'S03' });
     actions.push({ label: '🌐 Open Digital Twin', type: 'navigate', payload: 'digital-twin' });

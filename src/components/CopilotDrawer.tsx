@@ -44,6 +44,7 @@ export const CopilotDrawer: React.FC<CopilotDrawerProps> = ({ isOpen, onClose })
     maintenanceTasks,
     sensorHealth,
     inspectionEvents,
+    spareReadiness,
     isCameraContaminated,
     triggerScanSequence,
     toggleCameraContamination,
@@ -122,12 +123,19 @@ Select a quick question below or ask me anything about live telemetry, splice fa
         maintenanceTasks,
         sensorHealth,
         inspectionEvents,
+        spareReadiness,
         activeTab,
         selectedSpliceId,
         isCameraContaminated,
       };
 
-      const response: CopilotResponse = await queryCopilot(textToSend, copilotCtx, apiKey);
+      const historyTurns = messages.map((m) => ({
+        role: m.sender === 'user' ? ('user' as const) : ('assistant' as const),
+        content: m.text,
+        timestamp: m.timestamp,
+      }));
+
+      const response: CopilotResponse = await queryCopilot(textToSend, copilotCtx, historyTurns, apiKey);
 
       const botMsg: ChatMessage = {
         id: `msg-${Date.now() + 1}`,
