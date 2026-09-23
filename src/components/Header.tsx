@@ -16,9 +16,15 @@ import {
   Eye,
   ScanLine,
   Sliders,
+  Bot,
 } from 'lucide-react';
 
-export const Header: React.FC = () => {
+interface HeaderProps {
+  onToggleCopilot?: () => void;
+  isCopilotOpen?: boolean;
+}
+
+export const Header: React.FC<HeaderProps> = ({ onToggleCopilot, isCopilotOpen }) => {
   const {
     activeTab,
     setActiveTab,
@@ -145,6 +151,24 @@ export const Header: React.FC = () => {
               <span>Scan S03</span>
             </button>
           </div>
+
+          {/* AI Copilot Toggle Button */}
+          {onToggleCopilot && (
+            <button
+              onClick={onToggleCopilot}
+              className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer shadow-sm border ${
+                isCopilotOpen
+                  ? 'bg-cyan-950 text-cyan-300 border-cyan-500 ring-2 ring-cyan-400/30'
+                  : 'bg-gradient-to-r from-slate-900 via-indigo-950 to-slate-900 text-cyan-300 hover:text-white border-cyan-700/60 hover:border-cyan-400'
+              }`}
+            >
+              <Bot className="w-3.5 h-3.5 text-cyan-400 animate-pulse" />
+              <span className="font-display-tech tracking-wide">AI COPILOT</span>
+              <span className="px-1.5 py-0.2 rounded-full text-[9px] font-mono-tech bg-cyan-400 text-slate-950 font-bold">
+                LLM
+              </span>
+            </button>
+          )}
         </div>
       </div>
 
