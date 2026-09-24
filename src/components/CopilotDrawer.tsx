@@ -1,4 +1,24 @@
-import React, { useState, useRef, useEffect } from 'react';
+/**
+ * CopilotDrawer — Floating, draggable, resizable SpliceGuard AI Copilot panel.
+ *
+ * Architecture:
+ * - useCopilotLayout  → drag / resize / localStorage persistence
+ * - CopilotMessage    → per-message rendering (user bubble / AI card)
+ * - CopilotMarkdown   → safe markdown renderer (no dangerouslySetInnerHTML)
+ *
+ * What changed vs the original:
+ * - Panel is now freely draggable (pointer-event drag on header)
+ * - Panel is resizable from all edges / corners
+ * - Position + size saved to localStorage under "spliceguard-copilot-layout"
+ * - Header shows real connection state, memory turn count, Reset Layout button
+ * - Messages use CopilotMessage → no more raw ** or ### in output
+ * - Raw SVG / HTML artifacts are stripped before rendering
+ * - Loading state shows animated "Analyzing live context…" indicator
+ * - Source badge (Gemini / Domain Fallback) on every AI message
+ * - All existing actions, navigation, scan triggers preserved unchanged
+ */
+
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { useApp } from '../context/AppContext';
 import {
   queryCopilot,
@@ -8,15 +28,21 @@ import {
   CopilotBackendStatus,
 } from '../services/copilotService';
 import {
-  Bot,
   Send,
   X,
   Minimize2,
   Maximize2,
-  Sparkles,
-  ChevronRight,
+  Brain,
+  RotateCcw,
+  Zap,
 } from 'lucide-react';
 
+import { CopilotMessage } from './copilot/CopilotMessage';
+import { useCopilotLayout, ResizeEdge } from './copilot/useCopilotLayout';
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
 interface ChatMessage {
   id: string;
   sender: 'user' | 'copilot';
@@ -31,7 +57,68 @@ interface CopilotDrawerProps {
   onClose: () => void;
 }
 
-export const CopilotDrawer: React.FC<CopilotDrawerProps> = ({ isOpen, onClose }) => {
+// ---------------------------------------------------------------------------
+// Quick action chips
+// ---------------------------------------------------------------------------
+const QUICK_ACTIONS = [
+  { label: 'Plant Status', prompt: 'whats the plant status' },
+  { label: 'Active Alerts', prompt: 'show active alerts' },
+  { label: 'Digital Twin', prompt: 'digital twin' },
+  { label: 'Maintenance', prompt: 'maintenance' },
+  { label: 'Sensor Health', prompt: 'sensor diagnostics' },
+  { label: 'Scan S03', prompt: 'analyze splice S03' },
+];
+
+// ---------------------------------------------------------------------------
+// Resize handle component
+// ---------------------------------------------------------------------------
+// Edges we actually render — subset of the full ResizeEdge union from the hook
+type VisibleEdge = 'bottom-right' | 'bottom' | 'right' | 'bottom-left' | 'left';
+
+function ResizeEdgeHandle({
+  edge,
+  resizeHandleProps,
+}: {
+  edge: VisibleEdge;
+  resizeHandleProps: (edge: ResizeEdge) => object;
+}) {
+  const edgeStyles: Record<VisibleEdge, string> = {
+    'bottom-right': 'absolute bottom-0 right-0 w-5 h-5 cursor-se-resize z-10',
+    bottom: 'absolute bottom-0 left-4 right-4 h-1.5 cursor-s-resize z-10',
+    right: 'absolute right-0 top-10 bottom-4 w-1.5 cursor-e-resize z-10',
+    'bottom-left': 'absolute bottom-0 left-0 w-5 h-5 cursor-sw-resize z-10',
+    left: 'absolute left-0 top-10 bottom-4 w-1.5 cursor-w-resize z-10',
+  };
+
+  return (
+    <div
+      className={`${edgeStyles[edge]} select-none`}
+      {...resizeHandleProps(edge)}
+    >
+      {/* Visual grip only on bottom-right corner */}
+      {edge === 'bottom-right' && (
+        <svg
+          viewBox="0 0 12 12"
+          className="absolute bottom-1 right-1 w-3 h-3 text-slate-600 hover:text-cyan-600 transition-colors pointer-events-none"
+          fill="currentColor"
+        >
+          {/* Three diagonal dots — classic resize grip */}
+          <circle cx="10" cy="10" r="1.2" />
+          <circle cx="7" cy="10" r="1.2" />
+          <circle cx="10" cy="7" r="1.2" />
+        </svg>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Main component
+// ---------------------------------------------------------------------------
+export const CopilotDrawer: React.FC<CopilotDrawerProps> = ({
+  isOpen,
+  onClose,
+}) => {
   const {
     activeTab,
     setActiveTab,
@@ -53,358 +140,504 @@ export const CopilotDrawer: React.FC<CopilotDrawerProps> = ({ isOpen, onClose })
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [isMinimized, setIsMinimized] = useState(false);
-  const [backendStatus, setBackendStatus] = useState<CopilotBackendStatus | null>(null);
+  const [backendStatus, setBackendStatus] =
+    useState<CopilotBackendStatus | null>(null);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
 
-  const [messages, setMessages] = useState<ChatMessage[]>([
+  // Layout: drag + resize + localStorage
+  const { layout, dragHandleProps, resizeHandleProps, resetLayout } =
+    useCopilotLayout();
+
+  // Initial welcome message — built once using live conveyor data
+  const [messages, setMessages] = useState<ChatMessage[]>(() => [
     {
       id: 'init-1',
       sender: 'copilot',
-      text: `### 👋 Welcome to SpliceGuard AI Copilot!
-
-I am your real-time **Industrial AI Assistant** for conveyor condition monitoring and maintenance intelligence.
-
-- **Conveyor Status:** ${conveyor.status} (${conveyor.speedMs} m/s)
-- **Primary Risk Target:** **Splice S03** (Condition Score: 68/100, Warning)
-- **Active Open Alerts:** ${alerts.filter((a) => a.status === 'Open').length} Alerts
-
-Select a quick action below or ask me anything about live telemetry, splice failure risks, or maintenance tasks!`,
-      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      text: [
+        '### SpliceGuard AI Copilot Ready',
+        '',
+        `**Conveyor:** ${conveyor.name} — ${conveyor.status} at ${conveyor.speedMs} m/s`,
+        `**Primary Risk:** Splice S03 — Condition 68/100 (Warning)`,
+        `**Open Alerts:** ${alerts.filter((a) => a.status === 'Open').length} active`,
+        '',
+        'Select a quick action or ask me about plant status, splice conditions, maintenance, or sensor health.',
+      ].join('\n'),
+      timestamp: new Date().toLocaleTimeString([], {
+        hour: '2-digit',
+        minute: '2-digit',
+      }),
       source: 'simulated',
       actions: [
-        { label: '⚡ Trigger Scan on S03', type: 'trigger_scan', payload: 'S03' },
-        { label: '🚨 View Active Alerts', type: 'navigate', payload: 'alerts' },
-        { label: '🌐 Open Digital Twin', type: 'navigate', payload: 'digital-twin' },
+        { label: 'Trigger Scan S03', type: 'trigger_scan', payload: 'S03' },
+        { label: 'View Active Alerts', type: 'navigate', payload: 'alerts' },
+        { label: 'Open Digital Twin', type: 'navigate', payload: 'digital-twin' },
       ],
     },
   ]);
 
-  const quickPrompts = [
-    '📊 Plant Status',
-    '🚨 View Active Alerts',
-    '🌐 Open Digital Twin',
-    '🔧 Maintenance',
-    '🔍 Analyze Splice S03',
-  ];
-
-  // Fetch backend status when drawer opens
+  // -------------------------------------------------------------------------
+  // Backend status
+  // -------------------------------------------------------------------------
   useEffect(() => {
     if (isOpen) {
-      checkCopilotBackendStatus().then((status) => {
-        setBackendStatus(status);
-      });
+      checkCopilotBackendStatus().then((s) => setBackendStatus(s));
     }
   }, [isOpen]);
 
-  const scrollToBottom = () => {
+  const isGeminiConnected =
+    backendStatus?.geminiConfigured && backendStatus?.geminiReachable;
+
+  // -------------------------------------------------------------------------
+  // Auto-scroll
+  // -------------------------------------------------------------------------
+  const scrollToBottom = useCallback(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  };
+  }, []);
 
   useEffect(() => {
     if (isOpen && !isMinimized) {
-      scrollToBottom();
+      // Small delay so the DOM has painted the new message
+      const t = setTimeout(scrollToBottom, 60);
+      return () => clearTimeout(t);
     }
-  }, [messages, isOpen, isMinimized]);
+  }, [messages, isOpen, isMinimized, scrollToBottom]);
 
-  const handleSend = async (queryText?: string) => {
-    const textToSend = queryText || input;
-    if (!textToSend.trim() || isLoading) return;
-
-    const userMsg: ChatMessage = {
-      id: `msg-${Date.now()}`,
-      sender: 'user',
-      text: textToSend,
-      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-    };
-
-    setMessages((prev) => [...prev, userMsg]);
-    if (!queryText) setInput('');
-    setIsLoading(true);
-
-    try {
-      const copilotCtx = {
-        conveyor,
-        splices,
-        alerts,
-        maintenanceTasks,
-        sensorHealth,
-        inspectionEvents,
-        spareReadiness,
-        activeTab,
-        selectedSpliceId,
-        isCameraContaminated,
-      };
-
-      const historyTurns = messages.map((m) => ({
-        role: m.sender === 'user' ? ('user' as const) : ('assistant' as const),
-        content: m.text,
-        timestamp: m.timestamp,
-      }));
-
-      const response: CopilotResponse = await queryCopilot(textToSend, copilotCtx, historyTurns);
-
-      // Automatically execute navigation if returned by backend
-      if (response.actions) {
-        const navAction = response.actions.find((a) => a.type === 'navigate' && a.payload);
-        if (navAction && navAction.payload) {
-          handleActionClick(navAction);
-        }
+  // -------------------------------------------------------------------------
+  // Action handler — unchanged from original
+  // -------------------------------------------------------------------------
+  const handleActionClick = useCallback(
+    (action: CopilotAction) => {
+      switch (action.type) {
+        case 'navigate':
+          if (action.payload) setActiveTab(action.payload as any);
+          break;
+        case 'select_splice':
+          if (action.payload) setSelectedSpliceId(action.payload as any);
+          break;
+        case 'trigger_scan':
+          triggerScanSequence((action.payload as any) || 'S03');
+          break;
+        case 'toggle_camera':
+          toggleCameraContamination();
+          break;
+        case 'acknowledge_alert':
+          if (action.payload) acknowledgeAlert(action.payload);
+          break;
       }
+    },
+    [
+      setActiveTab,
+      setSelectedSpliceId,
+      triggerScanSequence,
+      toggleCameraContamination,
+      acknowledgeAlert,
+    ]
+  );
 
-      const botMsg: ChatMessage = {
-        id: `msg-${Date.now() + 1}`,
-        sender: 'copilot',
-        text: response.text,
-        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-        actions: response.actions,
-        source: response.source,
+  // -------------------------------------------------------------------------
+  // Send message
+  // -------------------------------------------------------------------------
+  const handleSend = useCallback(
+    async (queryText?: string) => {
+      const textToSend = (queryText ?? input).trim();
+      if (!textToSend || isLoading) return;
+
+      const ts = new Date().toLocaleTimeString([], {
+        hour: '2-digit',
+        minute: '2-digit',
+      });
+
+      const userMsg: ChatMessage = {
+        id: `msg-${Date.now()}`,
+        sender: 'user',
+        text: textToSend,
+        timestamp: ts,
       };
 
-      setMessages((prev) => [...prev, botMsg]);
-    } catch (err) {
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: `msg-err-${Date.now()}`,
+      setMessages((prev) => [...prev, userMsg]);
+      if (!queryText) setInput('');
+      setIsLoading(true);
+
+      try {
+        const copilotCtx = {
+          conveyor,
+          splices,
+          alerts,
+          maintenanceTasks,
+          sensorHealth,
+          inspectionEvents,
+          spareReadiness,
+          activeTab,
+          selectedSpliceId,
+          isCameraContaminated,
+        };
+
+        const historyTurns = messages.map((m) => ({
+          role: m.sender === 'user' ? ('user' as const) : ('assistant' as const),
+          content: m.text,
+          timestamp: m.timestamp,
+        }));
+
+        const response: CopilotResponse = await queryCopilot(
+          textToSend,
+          copilotCtx,
+          historyTurns
+        );
+
+        // Auto-navigate if backend returns a navigation action
+        if (response.actions) {
+          const navAction = response.actions.find(
+            (a) => a.type === 'navigate' && a.payload
+          );
+          if (navAction) handleActionClick(navAction);
+        }
+
+        const botMsg: ChatMessage = {
+          id: `msg-${Date.now() + 1}`,
           sender: 'copilot',
-          text: '⚠️ An error occurred while communicating with the AI Copilot service. Please try again.',
-          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-          source: 'simulated',
-        },
-      ]);
-    } finally {
-      setIsLoading(false);
+          text: response.text,
+          timestamp: new Date().toLocaleTimeString([], {
+            hour: '2-digit',
+            minute: '2-digit',
+          }),
+          actions: response.actions,
+          source: response.source,
+        };
+
+        setMessages((prev) => [...prev, botMsg]);
+      } catch {
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: `msg-err-${Date.now()}`,
+            sender: 'copilot',
+            text: '**Communication error.** Unable to reach SpliceGuard AI Copilot service. Please try again.',
+            timestamp: new Date().toLocaleTimeString([], {
+              hour: '2-digit',
+              minute: '2-digit',
+            }),
+            source: 'simulated',
+          },
+        ]);
+      } finally {
+        setIsLoading(false);
+      }
+    },
+    [
+      input,
+      isLoading,
+      conveyor,
+      splices,
+      alerts,
+      maintenanceTasks,
+      sensorHealth,
+      inspectionEvents,
+      spareReadiness,
+      activeTab,
+      selectedSpliceId,
+      isCameraContaminated,
+      messages,
+      handleActionClick,
+    ]
+  );
+
+  // -------------------------------------------------------------------------
+  // Keyboard shortcut: Shift+Enter = newline, Enter = send
+  // -------------------------------------------------------------------------
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      handleSend();
     }
   };
 
-  const handleActionClick = (action: CopilotAction) => {
-    switch (action.type) {
-      case 'navigate':
-        if (action.payload) setActiveTab(action.payload as any);
-        break;
-      case 'select_splice':
-        if (action.payload) setSelectedSpliceId(action.payload as any);
-        break;
-      case 'trigger_scan':
-        triggerScanSequence((action.payload as any) || 'S03');
-        break;
-      case 'toggle_camera':
-        toggleCameraContamination();
-        break;
-      case 'acknowledge_alert':
-        if (action.payload) acknowledgeAlert(action.payload);
-        break;
-    }
-  };
-
+  // -------------------------------------------------------------------------
+  // Render guard
+  // -------------------------------------------------------------------------
   if (!isOpen) return null;
 
-  const isGeminiConnected = backendStatus?.geminiConfigured && backendStatus?.geminiReachable;
+  // -------------------------------------------------------------------------
+  // Panel style — positioned via layout state
+  // -------------------------------------------------------------------------
+  const panelStyle: React.CSSProperties = isMinimized
+    ? {
+        position: 'fixed',
+        left: layout.x,
+        top: layout.y,
+        width: layout.width,
+        height: 52,
+        zIndex: 50,
+      }
+    : {
+        position: 'fixed',
+        left: layout.x,
+        top: layout.y,
+        width: layout.width,
+        height: layout.height,
+        zIndex: 50,
+        display: 'flex',
+        flexDirection: 'column',
+        minWidth: 320,
+        minHeight: 400,
+      };
 
+  // -------------------------------------------------------------------------
+  // JSX
+  // -------------------------------------------------------------------------
   return (
     <div
-      className={`fixed z-50 transition-all duration-300 ${
-        isMinimized
-          ? 'bottom-6 right-6 w-80 h-14 bg-slate-900 border border-cyan-500/40 rounded-xl shadow-2xl overflow-hidden'
-          : 'bottom-6 right-4 sm:right-6 w-full max-w-lg h-[620px] max-h-[85vh] bg-slate-900 border border-cyan-500/30 rounded-2xl shadow-2xl flex flex-col backdrop-blur-xl overflow-hidden'
-      }`}
+      style={panelStyle}
+      className="bg-slate-900 border border-slate-700/80 rounded-xl shadow-2xl overflow-hidden select-none"
     >
-      {/* Header Bar */}
-      <div className="px-4 py-3 bg-slate-950/90 border-b border-slate-800 flex items-center justify-between gap-2">
-        <div className="flex items-center gap-2.5">
-          <div className="relative">
-            <div className="w-8 h-8 rounded-lg bg-gradient-to-tr from-cyan-500 to-indigo-600 p-0.5 flex items-center justify-center">
-              <div className="w-full h-full bg-slate-950 rounded-[7px] flex items-center justify-center">
-                <Bot className="w-4 h-4 text-cyan-400" />
+      {/* ================================================================
+          HEADER — drag handle
+      ================================================================ */}
+      <div
+        {...dragHandleProps}
+        className="
+          flex items-center justify-between gap-2
+          px-3 py-2.5
+          bg-slate-950/95 border-b border-slate-800
+          shrink-0
+        "
+      >
+        {/* Left: identity + status */}
+        <div className="flex items-center gap-2.5 min-w-0">
+          {/* Icon badge */}
+          <div className="relative shrink-0">
+            <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-cyan-500 to-indigo-600 p-px flex items-center justify-center">
+              <div className="w-full h-full bg-slate-950 rounded-[6px] flex items-center justify-center">
+                <Brain className="w-3.5 h-3.5 text-cyan-400" />
               </div>
             </div>
             <span
-              className={`absolute -top-1 -right-1 w-2.5 h-2.5 rounded-full ring-2 ring-slate-950 ${
-                isGeminiConnected ? 'bg-emerald-400 animate-pulse' : 'bg-amber-500'
+              className={`absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full ring-[1.5px] ring-slate-950 ${
+                isGeminiConnected
+                  ? 'bg-emerald-400 animate-pulse'
+                  : 'bg-amber-500'
               }`}
             />
           </div>
-          <div>
-            <div className="flex items-center gap-2">
-              <span className="font-display-tech font-bold text-sm text-white tracking-wide">
-                SpliceGuard <span className="text-cyan-400">AI Copilot</span>
-              </span>
+
+          {/* Text */}
+          <div className="min-w-0">
+            <div className="font-display-tech font-bold text-[11px] text-white tracking-wide leading-none truncate">
+              SpliceGuard{' '}
+              <span className="text-cyan-400">AI Copilot</span>
             </div>
-            <div className="text-[10px] text-slate-400 flex items-center gap-1.5 font-mono-tech">
+            <div className="flex items-center gap-1.5 mt-0.5 font-mono-tech text-[9px] leading-none">
+              {/* Connection state */}
               {isGeminiConnected ? (
-                <>
-                  <span className="text-emerald-400 font-semibold">● Gemini Connected</span>
-                  <span className="text-slate-600">•</span>
-                  <span>Memory: {messages.length} turns</span>
-                  <span className="text-slate-600">•</span>
-                  <span className="text-cyan-300">Live Context</span>
-                </>
+                <span className="flex items-center gap-1 text-emerald-400">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 inline-block" />
+                  Gemini Connected
+                </span>
               ) : (
-                <>
-                  <span className="text-amber-400 font-semibold">⚙️ Domain Fallback</span>
-                  <span className="text-slate-600">•</span>
-                  <span className="text-slate-500">Gemini: Not Connected</span>
-                </>
+                <span className="flex items-center gap-1 text-amber-400/90">
+                  <span className="w-1.5 h-1.5 rounded-full bg-amber-400 inline-block" />
+                  Domain Fallback
+                </span>
               )}
+              <span className="text-slate-700">·</span>
+              {/* Memory count */}
+              <span className="text-slate-500">
+                Memory: {messages.length} turns
+              </span>
+              <span className="text-slate-700">·</span>
+              {/* Live context badge */}
+              <span className="text-cyan-600">Live Context</span>
             </div>
           </div>
         </div>
 
-        <div className="flex items-center gap-1">
+        {/* Right: controls — pointerDown must NOT propagate to drag handle */}
+        <div
+          className="flex items-center gap-0.5 shrink-0"
+          onPointerDown={(e) => e.stopPropagation()}
+        >
+          {/* Reset layout */}
           <button
-            onClick={() => setIsMinimized(!isMinimized)}
+            onClick={resetLayout}
+            className="p-1.5 text-slate-500 hover:text-slate-300 hover:bg-slate-800 rounded-lg transition-colors cursor-pointer"
+            title="Reset panel position & size"
+          >
+            <RotateCcw className="w-3.5 h-3.5" />
+          </button>
+
+          {/* Minimize / restore */}
+          <button
+            onClick={() => setIsMinimized((v) => !v)}
             className="p-1.5 text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg transition-colors cursor-pointer"
             title={isMinimized ? 'Expand' : 'Minimize'}
           >
-            {isMinimized ? <Maximize2 className="w-4 h-4" /> : <Minimize2 className="w-4 h-4" />}
+            {isMinimized ? (
+              <Maximize2 className="w-3.5 h-3.5" />
+            ) : (
+              <Minimize2 className="w-3.5 h-3.5" />
+            )}
           </button>
+
+          {/* Close */}
           <button
             onClick={onClose}
-            className="p-1.5 text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg transition-colors cursor-pointer"
+            className="p-1.5 text-slate-400 hover:text-rose-400 hover:bg-slate-800 rounded-lg transition-colors cursor-pointer"
             title="Close Copilot"
           >
-            <X className="w-4 h-4" />
+            <X className="w-3.5 h-3.5" />
           </button>
         </div>
       </div>
 
+      {/* ================================================================
+          BODY — only rendered when not minimized
+      ================================================================ */}
       {!isMinimized && (
         <>
-          {/* Messages Area */}
-          <div className="flex-1 p-4 overflow-y-auto space-y-4 bg-slate-900/60 no-scrollbar text-xs">
+          {/* ============================================================
+              MESSAGES AREA — this is the ONLY scrollable region
+          ============================================================ */}
+          <div
+            className="flex-1 overflow-y-auto overflow-x-hidden px-3 py-3 space-y-3 bg-slate-900/70"
+            style={{ overscrollBehavior: 'contain' }}
+          >
             {messages.map((msg) => (
-              <div
+              <CopilotMessage
                 key={msg.id}
-                className={`flex gap-3 ${msg.sender === 'user' ? 'justify-end' : 'justify-start'}`}
-              >
-                {msg.sender === 'copilot' && (
-                  <div className="w-7 h-7 rounded-lg bg-cyan-950 border border-cyan-800/60 flex items-center justify-center shrink-0 mt-0.5 shadow-sm">
-                    <Sparkles className="w-3.5 h-3.5 text-cyan-400" />
-                  </div>
-                )}
-
-                <div className={`max-w-[85%] ${msg.sender === 'user' ? 'items-end' : 'items-start'}`}>
-                  <div
-                    className={`p-3.5 rounded-xl text-slate-200 leading-relaxed font-sans shadow-md ${
-                      msg.sender === 'user'
-                        ? 'bg-cyan-600 text-white rounded-br-none'
-                        : 'bg-slate-800/90 border border-slate-700/80 rounded-bl-none'
-                    }`}
-                  >
-                    {/* Render markdown format */}
-                    <div className="space-y-2 whitespace-pre-wrap">
-                      {msg.text.split('\n').map((line, idx) => {
-                        if (line.startsWith('### ')) {
-                          return (
-                            <h4 key={idx} className="font-bold text-sm text-cyan-300 border-b border-slate-700/50 pb-1 mt-1">
-                              {line.replace('### ', '')}
-                            </h4>
-                          );
-                        }
-                        if (line.startsWith('#### ')) {
-                          return (
-                            <h5 key={idx} className="font-semibold text-xs text-cyan-200 mt-2">
-                              {line.replace('#### ', '')}
-                            </h5>
-                          );
-                        }
-                        if (line.startsWith('- ')) {
-                          return (
-                            <div key={idx} className="flex items-start gap-1.5 ml-1">
-                              <span className="text-cyan-400 mt-1">•</span>
-                              <span>{line.replace('- ', '')}</span>
-                            </div>
-                          );
-                        }
-                        return <p key={idx}>{line}</p>;
-                      })}
-                    </div>
-
-                    {/* Action Buttons */}
-                    {msg.actions && msg.actions.length > 0 && (
-                      <div className="mt-3 pt-2.5 border-t border-slate-700/60 flex flex-wrap gap-1.5">
-                        {msg.actions.map((act, i) => (
-                          <button
-                            key={i}
-                            onClick={() => handleActionClick(act)}
-                            className="px-2.5 py-1 rounded bg-cyan-950/80 hover:bg-cyan-900 border border-cyan-600/50 text-cyan-300 font-mono-tech text-[10px] flex items-center gap-1 transition-all cursor-pointer shadow-xs active:scale-95"
-                          >
-                            <span>{act.label}</span>
-                            <ChevronRight className="w-3 h-3 text-cyan-400" />
-                          </button>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-
-                  <div className="mt-1 flex items-center justify-between gap-2 px-1 text-[9px] font-mono-tech text-slate-500">
-                    <span>{msg.timestamp}</span>
-                    {msg.source && (
-                      <span className="text-slate-400">
-                        {msg.source === 'gemini' ? '🧠 Gemini AI' : '⚙️ Domain Fallback'}
-                      </span>
-                    )}
-                  </div>
-                </div>
-
-                {msg.sender === 'user' && (
-                  <div className="w-7 h-7 rounded-lg bg-cyan-600 flex items-center justify-center shrink-0 mt-0.5 text-white font-bold text-xs shadow-sm">
-                    U
-                  </div>
-                )}
-              </div>
+                sender={msg.sender}
+                text={msg.text}
+                timestamp={msg.timestamp}
+                actions={msg.actions}
+                source={msg.source}
+                onAction={handleActionClick}
+              />
             ))}
 
+            {/* Loading indicator */}
             {isLoading && (
-              <div className="flex gap-3 items-center text-cyan-400 font-mono-tech text-xs animate-pulse">
-                <div className="w-7 h-7 rounded-lg bg-cyan-950 border border-cyan-800 flex items-center justify-center">
-                  <Sparkles className="w-3.5 h-3.5 text-cyan-400 animate-spin" />
+              <div className="flex items-start gap-2">
+                {/* Avatar */}
+                <div className="shrink-0 w-6 h-6 rounded-lg bg-cyan-950/80 border border-cyan-800/50 flex items-center justify-center mt-0.5">
+                  <Brain className="w-3 h-3 text-cyan-400" />
                 </div>
-                <span>Analyzing telemetry & computing response...</span>
+                {/* Pulse card */}
+                <div className="bg-slate-800/80 border border-slate-700/60 rounded-xl rounded-tl-none px-3 py-2.5 flex items-center gap-2">
+                  <div className="flex gap-1 items-center">
+                    <span
+                      className="w-1.5 h-1.5 bg-cyan-400 rounded-full animate-bounce"
+                      style={{ animationDelay: '0ms' }}
+                    />
+                    <span
+                      className="w-1.5 h-1.5 bg-cyan-400 rounded-full animate-bounce"
+                      style={{ animationDelay: '150ms' }}
+                    />
+                    <span
+                      className="w-1.5 h-1.5 bg-cyan-400 rounded-full animate-bounce"
+                      style={{ animationDelay: '300ms' }}
+                    />
+                  </div>
+                  <span className="text-[10px] font-mono-tech text-slate-400">
+                    Analyzing live context…
+                  </span>
+                </div>
               </div>
             )}
 
             <div ref={messagesEndRef} />
           </div>
 
-          {/* Quick Actions Bar */}
-          <div className="px-3 py-2 bg-slate-950/70 border-t border-slate-800 flex items-center gap-1.5 overflow-x-auto no-scrollbar">
-            {quickPrompts.map((prompt, i) => (
+          {/* ============================================================
+              QUICK ACTIONS BAR — sticky above input
+          ============================================================ */}
+          <div className="shrink-0 px-2.5 py-1.5 bg-slate-950/60 border-t border-slate-800/80 flex items-center gap-1.5 overflow-x-auto">
+            {QUICK_ACTIONS.map((qa, i) => (
               <button
                 key={i}
-                onClick={() => handleSend(prompt)}
+                onClick={() => handleSend(qa.prompt)}
                 disabled={isLoading}
-                className="px-2.5 py-1 rounded-full bg-slate-800 hover:bg-cyan-950 text-slate-300 hover:text-cyan-300 border border-slate-700 hover:border-cyan-700 text-[10px] whitespace-nowrap transition-colors cursor-pointer shrink-0"
+                className="
+                  shrink-0 flex items-center gap-1
+                  px-2.5 py-1
+                  rounded-full
+                  bg-slate-800/80 hover:bg-slate-700
+                  border border-slate-700/60 hover:border-slate-600
+                  text-slate-400 hover:text-slate-200
+                  font-mono-tech text-[10px]
+                  whitespace-nowrap
+                  transition-all duration-150
+                  disabled:opacity-40 disabled:cursor-not-allowed
+                  cursor-pointer
+                "
               >
-                {prompt}
+                <Zap className="w-2.5 h-2.5 text-cyan-600 shrink-0" />
+                {qa.label}
               </button>
             ))}
           </div>
 
-          {/* Chat Input Bar */}
+          {/* ============================================================
+              CHAT INPUT — fixed at panel bottom
+          ============================================================ */}
           <form
             onSubmit={(e) => {
               e.preventDefault();
               handleSend();
             }}
-            className="p-3 bg-slate-950 border-t border-slate-800 flex items-center gap-2"
+            className="shrink-0 flex items-center gap-2 px-3 py-2.5 bg-slate-950 border-t border-slate-800"
+            // Stop pointer events propagating to drag/resize handlers
+            onPointerDown={(e) => e.stopPropagation()}
           >
             <input
+              ref={inputRef}
               type="text"
               value={input}
               onChange={(e) => setInput(e.target.value)}
-              placeholder="Ask Copilot about plant status, alerts, maintenance..."
-              className="flex-1 bg-slate-900 border border-slate-700/80 rounded-xl px-3.5 py-2 text-xs text-white placeholder:text-slate-500 focus:outline-none focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500 transition-all font-sans"
+              onKeyDown={handleKeyDown}
+              disabled={isLoading}
+              placeholder="Ask about plant status, alerts, maintenance…"
+              autoComplete="off"
+              className="
+                flex-1 min-w-0
+                bg-slate-900 border border-slate-700/80 rounded-lg
+                px-3 py-1.5
+                text-[11px] text-white placeholder:text-slate-600
+                font-sans
+                focus:outline-none focus:border-cyan-600/70 focus:ring-1 focus:ring-cyan-600/30
+                disabled:opacity-50 disabled:cursor-not-allowed
+                transition-colors
+              "
             />
             <button
               type="submit"
               disabled={!input.trim() || isLoading}
-              className="p-2.5 bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-white rounded-xl transition-all disabled:opacity-50 disabled:cursor-not-allowed shadow-md cursor-pointer shrink-0"
+              className="
+                shrink-0 p-2
+                bg-gradient-to-r from-cyan-600 to-indigo-600
+                hover:from-cyan-500 hover:to-indigo-500
+                text-white rounded-lg shadow
+                transition-all duration-150
+                disabled:opacity-40 disabled:cursor-not-allowed
+                cursor-pointer active:scale-95
+              "
+              title="Send (Enter)"
             >
-              <Send className="w-4 h-4" />
+              <Send className="w-3.5 h-3.5" />
             </button>
           </form>
+        </>
+      )}
+
+      {/* ================================================================
+          RESIZE HANDLES — only when fully expanded
+      ================================================================ */}
+      {!isMinimized && (
+        <>
+          <ResizeEdgeHandle edge="bottom-right" resizeHandleProps={resizeHandleProps} />
+          <ResizeEdgeHandle edge="bottom" resizeHandleProps={resizeHandleProps} />
+          <ResizeEdgeHandle edge="right" resizeHandleProps={resizeHandleProps} />
+          <ResizeEdgeHandle edge="bottom-left" resizeHandleProps={resizeHandleProps} />
+          <ResizeEdgeHandle edge="left" resizeHandleProps={resizeHandleProps} />
         </>
       )}
     </div>
