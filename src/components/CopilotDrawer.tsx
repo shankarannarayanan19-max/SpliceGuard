@@ -1,6 +1,12 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { useApp } from '../context/AppContext';
-import { queryCopilot, CopilotResponse, CopilotAction } from '../services/copilotService';
+import {
+  queryCopilot,
+  checkCopilotBackendStatus,
+  CopilotResponse,
+  CopilotAction,
+  CopilotBackendStatus,
+} from '../services/copilotService';
 import {
   Bot,
   Send,
@@ -8,14 +14,7 @@ import {
   Minimize2,
   Maximize2,
   Sparkles,
-  Key,
-  RotateCcw,
-  Zap,
   ChevronRight,
-  Shield,
-  Activity,
-  CheckCircle2,
-  AlertTriangle,
 } from 'lucide-react';
 
 interface ChatMessage {
@@ -54,9 +53,7 @@ export const CopilotDrawer: React.FC<CopilotDrawerProps> = ({ isOpen, onClose })
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [isMinimized, setIsMinimized] = useState(false);
-  const [apiKey, setApiKey] = useState<string>(() => localStorage.getItem('spliceguard_gemini_key') || '');
-  const [showKeyModal, setShowKeyModal] = useState(false);
-  const [tempApiKey, setTempApiKey] = useState('');
+  const [backendStatus, setBackendStatus] = useState<CopilotBackendStatus | null>(null);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
@@ -66,29 +63,39 @@ export const CopilotDrawer: React.FC<CopilotDrawerProps> = ({ isOpen, onClose })
       sender: 'copilot',
       text: `### 👋 Welcome to SpliceGuard AI Copilot!
 
-I am your real-time **Cyber-Industrial AI Assistant**, monitoring **Kirandul Complex CV-01**.
+I am your real-time **Industrial AI Assistant** for conveyor condition monitoring and maintenance intelligence.
 
 - **Conveyor Status:** ${conveyor.status} (${conveyor.speedMs} m/s)
-- **High-Risk Target:** **Splice S03** (Condition Score: 68/100, Magnetic Flux Leakage Anomaly)
+- **Primary Risk Target:** **Splice S03** (Condition Score: 68/100, Warning)
 - **Active Open Alerts:** ${alerts.filter((a) => a.status === 'Open').length} Alerts
 
-Select a quick question below or ask me anything about live telemetry, splice failure risks, or maintenance tasks!`,
+Select a quick action below or ask me anything about live telemetry, splice failure risks, or maintenance tasks!`,
       timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-      source: apiKey ? 'gemini' : 'simulated',
+      source: 'simulated',
       actions: [
         { label: '⚡ Trigger Scan on S03', type: 'trigger_scan', payload: 'S03' },
-        { label: '🚨 View High-Risk Alerts', type: 'navigate', payload: 'alerts' },
-        { label: '🌐 Inspect Digital Twin', type: 'navigate', payload: 'digital-twin' },
+        { label: '🚨 View Active Alerts', type: 'navigate', payload: 'alerts' },
+        { label: '🌐 Open Digital Twin', type: 'navigate', payload: 'digital-twin' },
       ],
     },
   ]);
 
   const quickPrompts = [
-    '🔍 Analyze Splice S03 failure risk',
-    '🚨 Summarize open high-priority alerts',
-    '🔧 Recommend maintenance schedule',
-    '📡 Check camera & sensor system health',
+    '📊 Plant Status',
+    '🚨 View Active Alerts',
+    '🌐 Open Digital Twin',
+    '🔧 Maintenance',
+    '🔍 Analyze Splice S03',
   ];
+
+  // Fetch backend status when drawer opens
+  useEffect(() => {
+    if (isOpen) {
+      checkCopilotBackendStatus().then((status) => {
+        setBackendStatus(status);
+      });
+    }
+  }, [isOpen]);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -135,7 +142,15 @@ Select a quick question below or ask me anything about live telemetry, splice fa
         timestamp: m.timestamp,
       }));
 
-      const response: CopilotResponse = await queryCopilot(textToSend, copilotCtx, historyTurns, apiKey);
+      const response: CopilotResponse = await queryCopilot(textToSend, copilotCtx, historyTurns);
+
+      // Automatically execute navigation if returned by backend
+      if (response.actions) {
+        const navAction = response.actions.find((a) => a.type === 'navigate' && a.payload);
+        if (navAction && navAction.payload) {
+          handleActionClick(navAction);
+        }
+      }
 
       const botMsg: ChatMessage = {
         id: `msg-${Date.now() + 1}`,
@@ -155,6 +170,7 @@ Select a quick question below or ask me anything about live telemetry, splice fa
           sender: 'copilot',
           text: '⚠️ An error occurred while communicating with the AI Copilot service. Please try again.',
           timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+          source: 'simulated',
         },
       ]);
     } finally {
@@ -182,13 +198,9 @@ Select a quick question below or ask me anything about live telemetry, splice fa
     }
   };
 
-  const saveApiKey = () => {
-    setApiKey(tempApiKey.trim());
-    localStorage.setItem('spliceguard_gemini_key', tempApiKey.trim());
-    setShowKeyModal(false);
-  };
-
   if (!isOpen) return null;
+
+  const isGeminiConnected = backendStatus?.geminiConfigured && backendStatus?.geminiReachable;
 
   return (
     <div
@@ -199,7 +211,7 @@ Select a quick question below or ask me anything about live telemetry, splice fa
       }`}
     >
       {/* Header Bar */}
-      <div className="px-4 py-3 bg-slate-950/80 border-b border-slate-800 flex items-center justify-between gap-2">
+      <div className="px-4 py-3 bg-slate-950/90 border-b border-slate-800 flex items-center justify-between gap-2">
         <div className="flex items-center gap-2.5">
           <div className="relative">
             <div className="w-8 h-8 rounded-lg bg-gradient-to-tr from-cyan-500 to-indigo-600 p-0.5 flex items-center justify-center">
@@ -207,30 +219,34 @@ Select a quick question below or ask me anything about live telemetry, splice fa
                 <Bot className="w-4 h-4 text-cyan-400" />
               </div>
             </div>
-            <span className="absolute -top-1 -right-1 w-2.5 h-2.5 bg-emerald-400 rounded-full ring-2 ring-slate-950 animate-pulse" />
+            <span
+              className={`absolute -top-1 -right-1 w-2.5 h-2.5 rounded-full ring-2 ring-slate-950 ${
+                isGeminiConnected ? 'bg-emerald-400 animate-pulse' : 'bg-amber-500'
+              }`}
+            />
           </div>
           <div>
             <div className="flex items-center gap-2">
               <span className="font-display-tech font-bold text-sm text-white tracking-wide">
-                SPLICE<span className="text-cyan-400">COPILOT</span>
-              </span>
-              <span className="px-1.5 py-0.2 rounded text-[9px] font-mono-tech font-semibold bg-cyan-950/90 text-cyan-300 border border-cyan-700/50">
-                AI LLM
+                SpliceGuard <span className="text-cyan-400">AI Copilot</span>
               </span>
             </div>
             <div className="text-[10px] text-slate-400 flex items-center gap-1.5 font-mono-tech">
-              <span>{apiKey ? 'Gemini 2.5 Flash' : 'Domain AI Engine'}</span>
-              <span className="text-slate-600">•</span>
-              <button
-                onClick={() => {
-                  setTempApiKey(apiKey);
-                  setShowKeyModal(true);
-                }}
-                className="text-cyan-400 hover:underline flex items-center gap-0.5 cursor-pointer"
-              >
-                <Key className="w-2.5 h-2.5" />
-                <span>{apiKey ? 'Key Set' : 'Configure Key'}</span>
-              </button>
+              {isGeminiConnected ? (
+                <>
+                  <span className="text-emerald-400 font-semibold">● Gemini Connected</span>
+                  <span className="text-slate-600">•</span>
+                  <span>Memory: {messages.length} turns</span>
+                  <span className="text-slate-600">•</span>
+                  <span className="text-cyan-300">Live Context</span>
+                </>
+              ) : (
+                <>
+                  <span className="text-amber-400 font-semibold">⚙️ Domain Fallback</span>
+                  <span className="text-slate-600">•</span>
+                  <span className="text-slate-500">Gemini: Not Connected</span>
+                </>
+              )}
             </div>
           </div>
         </div>
@@ -276,7 +292,7 @@ Select a quick question below or ask me anything about live telemetry, splice fa
                         : 'bg-slate-800/90 border border-slate-700/80 rounded-bl-none'
                     }`}
                   >
-                    {/* Render simple markdown format */}
+                    {/* Render markdown format */}
                     <div className="space-y-2 whitespace-pre-wrap">
                       {msg.text.split('\n').map((line, idx) => {
                         if (line.startsWith('### ')) {
@@ -305,7 +321,7 @@ Select a quick question below or ask me anything about live telemetry, splice fa
                       })}
                     </div>
 
-                    {/* Action Buttons if returned by AI */}
+                    {/* Action Buttons */}
                     {msg.actions && msg.actions.length > 0 && (
                       <div className="mt-3 pt-2.5 border-t border-slate-700/60 flex flex-wrap gap-1.5">
                         {msg.actions.map((act, i) => (
@@ -326,7 +342,7 @@ Select a quick question below or ask me anything about live telemetry, splice fa
                     <span>{msg.timestamp}</span>
                     {msg.source && (
                       <span className="text-slate-400">
-                        {msg.source === 'gemini' ? '⚡ Gemini 2.5' : '🧠 Domain Engine'}
+                        {msg.source === 'gemini' ? '🧠 Gemini AI' : '⚙️ Domain Fallback'}
                       </span>
                     )}
                   </div>
@@ -345,14 +361,14 @@ Select a quick question below or ask me anything about live telemetry, splice fa
                 <div className="w-7 h-7 rounded-lg bg-cyan-950 border border-cyan-800 flex items-center justify-center">
                   <Sparkles className="w-3.5 h-3.5 text-cyan-400 animate-spin" />
                 </div>
-                <span>Analyzing live telemetry & computing response...</span>
+                <span>Analyzing telemetry & computing response...</span>
               </div>
             )}
 
             <div ref={messagesEndRef} />
           </div>
 
-          {/* Quick Prompts Bar */}
+          {/* Quick Actions Bar */}
           <div className="px-3 py-2 bg-slate-950/70 border-t border-slate-800 flex items-center gap-1.5 overflow-x-auto no-scrollbar">
             {quickPrompts.map((prompt, i) => (
               <button
@@ -378,7 +394,7 @@ Select a quick question below or ask me anything about live telemetry, splice fa
               type="text"
               value={input}
               onChange={(e) => setInput(e.target.value)}
-              placeholder="Ask Copilot about S03 anomaly, alerts, or telemetry..."
+              placeholder="Ask Copilot about plant status, alerts, maintenance..."
               className="flex-1 bg-slate-900 border border-slate-700/80 rounded-xl px-3.5 py-2 text-xs text-white placeholder:text-slate-500 focus:outline-none focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500 transition-all font-sans"
             />
             <button
@@ -390,44 +406,6 @@ Select a quick question below or ask me anything about live telemetry, splice fa
             </button>
           </form>
         </>
-      )}
-
-      {/* API Key Modal overlay */}
-      {showKeyModal && (
-        <div className="absolute inset-0 z-50 bg-slate-950/90 backdrop-blur-md p-6 flex flex-col justify-center items-center text-center">
-          <div className="w-12 h-12 rounded-xl bg-cyan-950 border border-cyan-700 flex items-center justify-center mb-3 text-cyan-400">
-            <Key className="w-6 h-6" />
-          </div>
-          <h3 className="text-base font-bold text-white font-display-tech mb-1">
-            Configure Gemini AI API Key
-          </h3>
-          <p className="text-xs text-slate-400 mb-4 max-w-xs leading-relaxed">
-            Enter your Google Gemini API key to enable live `gemini-2.5-flash` model responses. If blank, SpliceGuard will use its built-in Cyber-Industrial Domain Engine.
-          </p>
-
-          <input
-            type="password"
-            value={tempApiKey}
-            onChange={(e) => setTempApiKey(e.target.value)}
-            placeholder="AIzaSy..."
-            className="w-full max-w-xs bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white mb-4 focus:outline-none focus:border-cyan-500 font-mono-tech"
-          />
-
-          <div className="flex gap-2">
-            <button
-              onClick={() => setShowKeyModal(false)}
-              className="px-3.5 py-1.5 rounded-lg bg-slate-800 text-slate-300 hover:bg-slate-700 text-xs font-semibold cursor-pointer"
-            >
-              Cancel
-            </button>
-            <button
-              onClick={saveApiKey}
-              className="px-4 py-1.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-semibold cursor-pointer shadow-md"
-            >
-              Save Key
-            </button>
-          </div>
-        </div>
       )}
     </div>
   );

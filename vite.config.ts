@@ -64,9 +64,28 @@ function aistudioMediaPlugin(): Plugin {
 }
 // LINT.ThenChange(//depot/google3/java/com/google/alkali/boq/makersuite/applet_dev_service/templates/initializers/react_theme/vite.config.ts:aistudio_media_plugin)
 
+function expressBackendPlugin(): Plugin {
+  return {
+    name: 'vite-plugin-express-backend',
+    async configureServer(server) {
+      server.middlewares.use(async (req, res, next) => {
+        if (req.url && req.url.startsWith('/api/copilot')) {
+          try {
+            const { app } = await import('./server/index');
+            return app(req as any, res as any, next);
+          } catch (err) {
+            console.error('Error in Express Copilot Backend Middleware:', err);
+          }
+        }
+        next();
+      });
+    },
+  };
+}
+
 export default defineConfig(() => {
   return {
-    plugins: [react(), tailwindcss(), aistudioMediaPlugin()],
+    plugins: [react(), tailwindcss(), aistudioMediaPlugin(), expressBackendPlugin()],
     resolve: {
       alias: {
         '@': path.resolve(__dirname, '.'),

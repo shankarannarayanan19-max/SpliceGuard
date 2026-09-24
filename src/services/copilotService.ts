@@ -280,61 +280,67 @@ ${sensorsStr}
 ==================================================`;
 }
 
+export interface CopilotBackendStatus {
+  geminiConfigured: boolean;
+  geminiReachable: boolean;
+  model: string;
+  memoryEnabled: boolean;
+  activeSessionsCount: number;
+}
+
 /**
- * Query entry point for SpliceGuard Copilot
+ * Checks backend status for Gemini connectivity and diagnostics
+ */
+export async function checkCopilotBackendStatus(): Promise<CopilotBackendStatus> {
+  try {
+    const res = await fetch('/api/copilot/status');
+    if (res.ok) {
+      const data = await res.json();
+      return data;
+    }
+  } catch (err) {
+    console.warn('Backend copilot status endpoint offline/unreachable:', err);
+  }
+  return {
+    geminiConfigured: false,
+    geminiReachable: false,
+    model: 'gemini-2.5-flash',
+    memoryEnabled: true,
+    activeSessionsCount: 0,
+  };
+}
+
+/**
+ * Query entry point for SpliceGuard Copilot - calls backend POST /api/copilot
  */
 export async function queryCopilot(
   userQuery: string,
   context: CopilotContext,
   chatHistory: ChatTurn[] = [],
-  apiKeyOverride?: string
+  sessionId: string = 'default-session'
 ): Promise<CopilotResponse> {
-  const envKey = (import.meta as any).env?.VITE_GEMINI_API_KEY || (import.meta as any).env?.GEMINI_API_KEY || '';
-  const apiKey = apiKeyOverride || envKey;
+  try {
+    const res = await fetch('/api/copilot', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        query: userQuery,
+        context,
+        sessionId,
+      }),
+    });
 
-  if (apiKey && apiKey !== 'MY_GEMINI_API_KEY') {
-    try {
-      const ai = new GoogleGenAI({ apiKey });
-      const telemetryContext = buildTelemetryPayload(context);
-
-      // Build conversation history messages
-      const historyFormatted = chatHistory.slice(-6).map((turn) => ({
-        role: turn.role === 'user' ? 'user' : 'model',
-        parts: [{ text: turn.content }],
-      }));
-
-      const contents = [
-        ...historyFormatted,
-        {
-          role: 'user',
-          parts: [
-            {
-              text: `${telemetryContext}\n\nUser Question: ${userQuery}`,
-            },
-          ],
-        },
-      ];
-
-      const response = await ai.models.generateContent({
-        model: 'gemini-2.5-flash',
-        config: {
-          systemInstruction: GEMINI_INDUSTRIAL_SYSTEM_PROMPT,
-        },
-        contents,
-      });
-
-      const responseText = response.text || 'No response text received from Gemini AI.';
-      const actions = extractActionsFromQueryAndContext(userQuery, responseText, context);
-
+    if (res.ok) {
+      const data = await res.json();
       return {
-        text: responseText,
-        actions,
-        source: 'gemini',
-        modelUsed: 'gemini-2.5-flash',
+        text: data.text,
+        actions: data.actions || [],
+        source: data.source === 'gemini' ? 'gemini' : 'simulated',
+        modelUsed: data.modelUsed,
       };
-    } catch (err: any) {
-      console.warn('Gemini API call failed, falling back to domain intelligence engine:', err);
     }
+  } catch (err) {
+    console.warn('Backend Copilot API call failed, falling back to frontend domain engine:', err);
   }
 
   // Fallback domain intelligence engine matching system prompt rules
